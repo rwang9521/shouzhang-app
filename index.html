@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>仓位手账 - Position Ledger</title>
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#FFFFFF">
+    <link rel="apple-touch-icon" href="icon-512.png">
+    <!-- 引入 Chart.js 用于高颜值图表 -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-color: #F2F2F7;
+            --card-bg: #FFFFFF;
+            --text-main: #1C1C1E;
+            --text-muted: #8E8E93;
+            --accent-blue: #007AFF;
+            --accent-purple: #AF52DE;
+            --profit-green: #34C759;
+            --loss-red: #FF3B30;
+            --border-color: #E5E5EA;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Icons", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-main); padding-bottom: 90px; -webkit-font-smoothing: antialiased; }
+        
+        /* Jony Ive 极简主义头部 */
+        header { padding: 40px 24px 20px; background: var(--card-bg); border-bottom: 1px solid var(--border-color); }
+        .header-title { font-size: 11px; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 1.2px; }
+        .total-assets { font-size: 40px; font-weight: 700; margin-top: 6px; letter-spacing: -1px; color: var(--text-main); }
+        
+        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); padding: 16px 24px; background: var(--card-bg); border-bottom: 1px solid var(--border-color); gap: 12px; }
+        .stat-box { text-align: left; }
+        .stat-label { font-size: 11px; color: var(--text-muted); font-weight: 500; margin-bottom: 4px; }
+        .stat-value { font-size: 16px; font-weight: 600; letter-spacing: -0.3px; }
+
+        /* 全局卡片样式 */
+        .card { background: var(--card-bg); margin: 16px 16px 0; padding: 24px; border-radius: 20px; border: 1px solid var(--border-color); box-shadow: 0 4px 20px rgba(0,0,0,0.01); }
+        .card-title { font-size: 15px; font-weight: 600; margin-bottom: 18px; color: var(--text-main); letter-spacing: -0.2px; }
+
+        /* 仓位比例条 */
+        .position-progress-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin-bottom: 16px; background: #E5E5EA; }
+        .progress-segment { height: 100%; transition: width 0.3s ease; }
+        #allocation-legend { display: flex; flex-wrap: wrap; gap: 12px; }
+
+        /* 列表展示 */
+        .item-row { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid #F2F2F7; }
+        .item-row:last-child { border-bottom: none; }
+        .item-left { display: flex; flex-direction: column; }
+        .item-right { text-align: right; display: flex; flex-direction: column; }
+        .primary-text { font-size: 16px; font-weight: 500; letter-spacing: -0.3px; }
+        .secondary-text { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
+
+        /* 表单与交互 */
+        select, input { width: 100%; padding: 14px; margin-bottom: 14px; border-radius: 12px; border: 1px solid var(--border-color); background: #F2F2F7; font-size: 15px; color: var(--text-main); outline: none; transition: border-color 0.2s; }
+        select:focus, input:focus { border-color: var(--accent-blue); background: var(--card-bg); }
+        button { width: 100%; padding: 14px; background: var(--text-main); color: #FFF; border: none; border-radius: 12px; font-size: 15px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
+        button:active { opacity: 0.8; }
+        button.secondary { background: transparent; color: var(--accent-blue); border: 1px solid var(--accent-blue); margin-top: 10px; }
+
+        /* 底部导航栏 */
+        .nav-bar { position: fixed; bottom: 0; left: 0; right: 0; height: 75px; background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid var(--border-color); display: flex; justify-content: space-around; align-items: center; z-index: 1000; padding-bottom: env(safe-area-inset-bottom); }
+        .nav-item { font-size: 10px; color: var(--text-muted); text-decoration: none; display: flex; flex-direction: column; align-items: center; cursor: pointer; font-weight: 500; transition: color 0.2s; }
+        .nav-item.active { color: var(--accent-blue); font-weight: 600; }
+        .nav-icon { font-size: 22px; margin-bottom: 3px; }
+
+        /* 视图切换控制 */
+        .view-panel { display: none; }
+        .view-panel.active { display: block; }
+        
+        .up-trend { color: var(--profit-green); }
+        .down-trend { color: var(--loss-red); }
+    </style>
+</head>
+<body>
+
+    <!-- 公共头部 -->
+    <header>
+        <div class="header-title">仓位手账 • 总资产 (USD)</div>
+        <div class="total-assets" id="global-assets">$0.00</div>
+    </header>
+
+    <div class="stats-grid">
+        <div class="stat-box"><div class="stat-label">累计收益率</div><div class="stat-value up-trend" id="global-roi">+32.82%</div></div>
+        <div class="stat-box"><div class="stat-label">当前净值</div><div class="stat-value" id="global-nav">1.3282</div></div>
+        <div class="stat-box"><div class="stat-label">现金余额</div><div class="stat-value" id="global-cash">$0.00</div></div>
+    </div>
+
+    <!-- 1. 总览视图 -->
+    <div id="view-overview" class="view-panel active">
+        <div class="card">
+            <div class="card-title">净值走势 (NAV)</div>
+            <canvas id="navChart" style="width:100%; height:180px;"></canvas>
+        </div>
+        <div class="card">
+            <div class="card-title">仓位分布</div>
+            <div class="position-progress-bar" id="allocation-bar"></div>
+            <div id="allocation-legend"></div>
+        </div>
+    </div>
+
+    <!-- 2. 持仓视图 -->
+    <div id="view-holdings" class="view-panel">
+        <div class="card">
+            <div class="card-title">多账户合并持仓</div>
+            <div id="holdings-list"></div>
+        </div>
+        <div class="card">
+            <div class="card-title">更新市场现价</div>
+            <select id="price-stock-select"></select>
+            <input type="number" id="new-price-input" step="0.01" placeholder="输入最新市场价">
+            <button onclick="updateStockPrice()">更新现价</button>
+        </div>
+    </div>
+
+    <!-- 3. 流水/交易录入视图 -->
+    <div id="view-transactions" class="view-panel">
+        <div class="card">
+            <div class="card-title">记一笔交易</div>
+            <select id="tx-account">
+                <option value="富途证券">富途证券</option>
+                <option value="老虎证券">老虎证券</option>
+                <option value="长桥证券">长桥证券</option>
+            </select>
+            <input type="text" id="tx-ticker" placeholder="股票代码 (如 AAPL)" style="text-transform:uppercase;">
+            <select id="tx-type">
+                <option value="BUY">买入 (BUY)</option>
+                <option value="SELL">卖出 (SELL)</option>
+                <option value="DIVIDEND">分红冲减成本 (DIVIDEND)</option>
+            </select>
+            <input type="number" id="tx-amount" step="0.01" placeholder="交易总金额 (美元)">
+            <input type="number" id="tx-shares" step="0.01" placeholder="成交股数 (分红填0)">
+            <button onclick="addTransaction()">确认记账</button>
+        </div>
+        <div class="card">
+            <div class="card-title">历史流水</div>
+            <div id="tx-history-list"></div>
+        </div>
+    </div>
+
+    <!-- 4. 账户与数据备份视图 -->
+    <div id="view-settings" class="view-panel">
+        <div class="card">
+            <div class="card-title">账户现金账户状态</div>
+            <div id="account-balances-list"></div>
+        </div>
+        <div class="card">
+            <div class="card-title">数据本地备份与恢复</div>
+            <button onclick="exportData()">导出数据备份 (JSON)</button>
+            <button class="secondary" onclick="document.getElementById('import-file').click()">导入数据恢复</button>
+            <input type="file" id="import-file" style="display:none;" onchange="importData(this)">
+        </div>
+    </div>
+
+    <!-- 底部导航 -->
+    <nav class="nav-bar">
+        <div class="nav-item active" onclick="switchView('overview', this)"><span class="nav-icon">⚏</span>总览</div>
+        <div class="nav-item" onclick="switchView('holdings', this)"><span class="nav-icon">⚱</span>持仓</div>
+        <div class="nav-item" onclick="switchView('transactions', this)"><span class="nav-icon">⇄</span>流水</div>
+        <div class="nav-item" onclick="switchView('settings', this)"><span class="nav-icon">⚙</span>管理</div>
+    </nav>
+
+    <script>
+        // 默认内置的种子初始化数据
+        let appData = {
+            accounts: { "富途证券": { cash: 500 }, "老虎证券": { cash: 347 }, "长桥证券": { cash: 0 } },
+            transactions: [
+                { id: 1, account: "富途证券", ticker: "AAPL", type: "BUY", amount: 600, shares: 4, date: "2025-05-09" },
+                { id: 2, account: "老虎证券", ticker: "AAPL", type: "BUY", amount: 300, shares: 2, date: "2025-06-12" }
+            ],
+            prices: { "AAPL": 187.50 },
+            navHistory: [
+                { date: "2025-05-09", nav: 1.0000 },
+                { date: "2025-12-31", nav: 1.1540 },
+                { date: "2026-05-31", nav: 1.3282 }
+            ]
+        };
+
+        if (localStorage.getItem('position_ledger_data')) {
+            appData = JSON.parse(localStorage.getItem('position_ledger_data'));
+        }
+
+        function saveData() {
+            localStorage.setItem('position_ledger_data', JSON.stringify(appData));
+            renderAll();
+        }
+
+        function calculateHoldings() {
+            let holdings = {}; 
+            appData.transactions.forEach(tx => {
+                let tk = tx.ticker.toUpperCase();
+                if (!holdings[tk]) {
+                    holdings[tk] = { shares: 0, netCost: 0, currentPrice: appData.prices[tk] || 0 };
+                }
+                if (tx.type === 'BUY') {
+                    holdings[tk].shares += parseFloat(tx.shares);
+                    holdings[tk].netCost += parseFloat(tx.amount);
+                } else if (tx.type === 'SELL') {
+                    holdings[tk].shares -= parseFloat(tx.shares);
+                    holdings[tk].netCost -= parseFloat(tx.amount);
+                } else if (tx.type === 'DIVIDEND') {
+                    holdings[tk].netCost -= parseFloat(tx.amount);
+                }
+            });
+            return holdings;
+        }
+
+        let navChartInstance = null;
+        function updateChart() {
+            const ctx = document.getElementById('navChart').getContext('2d');
+            if (navChartInstance) { navChartInstance.destroy(); }
+            navChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: appData.navHistory.map(h => h.date),
+                    datasets: [{
+                        label: '净值',
+                        data: appData.navHistory.map(h => h.nav),
+                        borderColor: '#007AFF',
+                        borderWidth: 2,
+                        pointBackgroundColor: '#FFFFFF',
+                        pointBorderColor: '#007AFF',
+                        pointRadius: 4,
+                        tension: 0.25,
+                        fill: false
+                    }]
+                },
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: { x: { grid: { display: false } }, y: { grid: { color: '#E5E5EA' } } }
+                }
+            });
+        }
+
+        function renderAll() {
+            const holdings = calculateHoldings();
+            let totalStockValue = 0;
+            Object.keys(holdings).forEach(tk => {
+                if(holdings[tk].shares > 0) {
+                    totalStockValue += holdings[tk].shares * holdings[tk].currentPrice;
+                }
+            });
+            let totalCash = Object.values(appData.accounts).reduce((sum, acc) => sum + acc.cash, 0);
+            let grandTotal = totalStockValue + totalCash;
+
+            document.getElementById('global-assets').innerText = `$${grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+            document.getElementById('global-cash').innerText = `$${totalCash.toFixed(2)}`;
+            
+            if (appData.navHistory.length > 0) {
+                let latestNav = appData.navHistory[appData.navHistory.length - 1].nav;
+                document.getElementById('global-nav').innerText = latestNav.toFixed(4);
+                let initialNav = appData.navHistory[0].nav;
+                let roi = ((latestNav - initialNav) / initialNav) * 100;
+                document.getElementById('global-roi').innerText = `${roi >= 0 ? '+' : ''}${roi.toFixed(2)}%`;
+            }
+
+            const holdingsList = document.getElementById('holdings-list');
+            holdingsList.innerHTML = '';
+            const selectStock = document.getElementById('price-stock-select');
+            selectStock.innerHTML = '';
+
+            let hasHoldings = false;
+            Object.keys(holdings).forEach(tk => {
+                let h = holdings[tk];
+                if(h.shares <= 0) return;
+                hasHoldings = true;
+                
+                let dilutedCostPrice = h.shares > 0 ? (h.netCost / h.shares) : 0;
+                let currentVal = h.shares * h.currentPrice;
+                let pl = currentVal - h.netCost;
+                let plRate = h.netCost > 0 ? (pl / h.netCost) * 100 : 0;
+
+                holdingsList.innerHTML += `
+                    <div class="item-row">
+                        <div class="item-left">
+                            <span class="primary-text">${tk}</span>
+                            <span class="secondary-text">持仓: ${h.shares} 股 | 摊薄成本: $${dilutedCostPrice.toFixed(2)}</span>
+                        </div>
+                        <div class="item-right">
+                            <span class="primary-text">$${currentVal.toFixed(2)}</span>
+                            <span class="secondary-text ${pl >= 0 ? 'up-trend' : 'down-trend'}">
+                                ${pl >= 0 ? '+' : ''}${pl.toFixed(2)} (${plRate.toFixed(2)}%)
+                            </span>
+                        </div>
+                    </div>`;
+                
+                selectStock.innerHTML += `<option value="${tk}">${tk}</option>`;
+            });
+
+            if(!hasHoldings) {
+                holdingsList.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding: 20px 0; font-size:14px;">暂无持仓，请先前往"流水"记账</div>';
+            }
+
+            const bar = document.getElementById('allocation-bar');
+            const legend = document.getElementById('allocation-legend');
+            bar.innerHTML = ''; legend.innerHTML = '';
+            const colors = ['#007AFF', '#AF52DE', '#34C759', '#FF9500', '#5AC8FA'];
+            let colorIdx = 0;
+
+            Object.keys(holdings).forEach(tk => {
+                let h = holdings[tk];
+                if(h.shares <= 0 || grandTotal === 0) return;
+                let pct = ((h.shares * h.currentPrice) / grandTotal) * 100;
+                let c = colors[colorIdx % colors.length];
+                colorIdx++;
+
+                bar.innerHTML += `<div class="progress-segment" style="width: ${pct}%; background: ${c}"></div>`;
+                legend.innerHTML += `<span style="font-size:12px; display:inline-flex; align-items:center; gap:4px; color:var(--text-main);"><i style="display:inline-block; width:8px; height:8px; background:${c}; border-radius:50%;"></i> ${tk} ${pct.toFixed(1)}%</span>`;
+            });
+
+            if (totalCash > 0 && grandTotal > 0) {
+                let cashPct = (totalCash / grandTotal) * 100;
+                bar.innerHTML += `<div class="progress-segment" style="width: ${cashPct}%; background: #E5E5EA"></div>`;
+                legend.innerHTML += `<span style="font-size:12px; display:inline-flex; align-items:center; gap:4px; color:var(--text-muted);"><i style="display:inline-block; width:8px; height:8px; background:#E5E5EA; border-radius:50%;"></i> 现金 ${cashPct.toFixed(1)}%</span>`;
+            }
+
+            document.getElementById('tx-history-list').innerHTML = appData.transactions.map(t => `
+                <div class="item-row">
+                    <div class="item-left"><span class="primary-text">${t.account} · ${t.ticker}</span><span class="secondary-text">${t.date}</span></div>
+                    <div class="item-right"><span class="primary-text">${t.type === 'BUY' ? '买入' : t.type === 'SELL' ? '卖出' : '分红'}</span><span class="secondary-text">${t.shares}股 / $${t.amount}</span></div>
+                </div>`).reverse().join('');
+
+            document.getElementById('account-balances-list').innerHTML = Object.keys(appData.accounts).map(a => `
+                <div class="item-row"><div class="item-left"><span class="primary-text">${a}</span></div><div class="item-right"><span class="primary-text">$${appData.accounts[a].cash.toFixed(2)}</span></div></div>`).join('');
+        }
+
+        function addTransaction() {
+            const acc = document.getElementById('tx-account').value;
+            const tk = document.getElementById('tx-ticker').value.toUpperCase().trim();
+            const type = document.getElementById('tx-type').value;
+            const amt = parseFloat(document.getElementById('tx-amount').value);
+            const sh = parseFloat(document.getElementById('tx-shares').value) || 0;
+
+            if(!tk || isNaN(amt)) return alert("请完整填写表单");
+
+            appData.transactions.push({
+                id: Date.now(), account: acc, ticker: tk, type: type, amount: amt, shares: sh, date: new Date().toISOString().split('T')[0]
+            });
+
+            if(type === 'BUY') appData.accounts[acc].cash -= amt;
+            if(type === 'SELL' || type === 'DIVIDEND') appData.accounts[acc].cash += amt;
+
+            if(!appData.prices[tk] && type === 'BUY' && sh > 0) {
+                appData.prices[tk] = amt / sh;
+            }
+
+            saveData();
+            document.getElementById('tx-ticker').value = '';
+            document.getElementById('tx-amount').value = '';
+            document.getElementById('tx-shares').value = '';
+        }
+
+        function updateStockPrice() {
+            const tk = document.getElementById('price-stock-select').value;
+            const np = parseFloat(document.getElementById('new-price-input').value);
+            if(!tk || isNaN(np)) return;
+            appData.prices[tk] = np;
+            saveData();
+            document.getElementById('new-price-input').value = '';
+        }
+
+        function switchView(viewId, element) {
+            document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+            document.getElementById(`view-${viewId}`).classList.add('active');
+            element.classList.add('active');
+            if (viewId === 'overview') { updateChart(); }
+        }
+
+        function exportData() {
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(appData));
+            const downloadAnchor = document.createElement('a');
+            downloadAnchor.setAttribute("href", dataStr);
+            downloadAnchor.setAttribute("download", `仓位手账_备份_${new Date().toISOString().split('T')[0]}.json`);
+            downloadAnchor.click();
+        }
+
+        function importData(input) {
+            const reader = new FileReader();
+            reader.onload = function(){
+                try {
+                    appData = JSON.parse(reader.result);
+                    saveData();
+                    updateChart();
+                    alert("数据恢复成功！");
+                } catch(e) {
+                    alert("解析备份文件失败，请确保文件格式正确。");
+                }
+            };
+            reader.readAsText(input.files[0]);
+        }
+
+        window.onload = function() {
+            renderAll();
+            updateChart();
+            // 注册 Service Worker
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('sw.js').then(() => {
+                    console.log('Service Worker 注册成功，支持离线访问。');
+                }).catch(err => console.log('Service Worker 注册失败: ', err));
+            }
+        }
+    </script>
+</body>
+</html>

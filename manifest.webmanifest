@@ -1,0 +1,17 @@
+{
+  "name": "仓位手账",
+  "short_name": "仓位手账",
+  "description": "极简多账户投资合并记账工具",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#F2F2F7",
+  "theme_color": "#FFFFFF",
+  "icons": [
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
