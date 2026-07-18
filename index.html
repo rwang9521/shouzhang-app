@@ -50,7 +50,7 @@
         .status-text { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
 
         .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); padding: 16px 20px; background: var(--card-bg); border-bottom: 1px solid var(--border-color); gap: 8px; }
-        .stat-box { text-align: left; }
+        .stats-grid .stat-box { text-align: left; }
         .stat-label { font-size: 10.5px; color: var(--text-muted); font-weight: 500; margin-bottom: 4px; white-space: nowrap; }
         .stat-value { font-size: 15px; font-weight: 600; letter-spacing: -0.3px; }
 
@@ -304,7 +304,51 @@
             } catch(e) {}
         }
 
-        // ============ 交易日自动记录净值点位 ============
+        // ============ 核心修复：根据今日行情涨跌幅，倒推并模拟出历史某天的真实资产规模 ============
+        function computeAssetsAtDate(targetDateStr) {
+            let holdings = {};
+            let cashBalance = 0;
+            
+            Object.keys(appData.accounts).forEach(acc => {
+                cashBalance += appData.accounts[acc].cash;
+            });
+
+            const sortedTx = [...appData.transactions].sort((a,b) => new Date(a.date) - new Date(b.date));
+            const targetDate = new Date(targetDateStr);
+            const todayStr = new Date().toISOString().split('T')[0];
+
+            sortedTx.forEach(tx => {
+                if (new Date(tx.date) > targetDate) {
+                    if (tx.type === 'BUY') cashBalance += tx.amount;
+                    if (tx.type === 'SELL' || tx.type === 'DIVIDEND') cashBalance -= tx.amount;
+                    if (tx.type === 'DEPOSIT') cashBalance -= tx.amount;
+                    if (tx.type === 'WITHDRAW') cashBalance += tx.amount;
+                } else {
+                    let tk = tx.ticker.toUpperCase();
+                    if (tk) {
+                        if (!holdings[tk]) holdings[tk] = 0;
+                        if (tx.type === 'BUY') holdings[tk] += parseFloat(tx.shares);
+                        if (tx.type === 'SELL') holdings[tk] -= parseFloat(tx.shares);
+                    }
+                }
+            });
+
+            let stockValue = 0;
+            Object.keys(holdings).forEach(tk => {
+                if (holdings[tk] > 0) {
+                    let price = appData.prices[tk] || 0;
+                    // 如果不是今天，且行情带有今日涨跌幅，我们需要把今日涨跌去掉，反推出历史（如7月8日）的相对结算价
+                    if (targetDateStr !== todayStr && appData.dailyPct && appData.dailyPct[tk]) {
+                        let pct = appData.dailyPct[tk] / 100;
+                        price = price / (1 + pct); 
+                    }
+                    stockValue += holdings[tk] * price;
+                }
+            });
+
+            return stockValue + cashBalance;
+        }
+
         function computeCurrentTotalAssets() {
             const holdings = calculateHoldings();
             let totalStockValue = 0;
@@ -316,19 +360,44 @@
         }
 
         function autoRecordDailyNav() {
-            const now = new Date();
-            const day = now.getDay();
-            if (day === 0 || day === 6) return; // 简单跳过周末，不作为交易日
-            const dateStr = now.toISOString().split('T')[0];
-            const total = computeCurrentTotalAssets();
             if (!appData.navHistory) appData.navHistory = [];
-            const existing = appData.navHistory.find(h => h.date === dateStr);
-            if (existing) {
-                if (existing.manual) return; // 用户手动记录过的当天数据，不覆盖
-                existing.totalAssets = total;
-            } else {
-                appData.navHistory.push({ date: dateStr, totalAssets: total, nav: 1, manual: false });
+            if (appData.navHistory.length === 0) {
+                const todayStr = new Date().toISOString().split('T')[0];
+                appData.navHistory.push({ date: todayStr, totalAssets: computeCurrentTotalAssets(), nav: 1, manual: false });
+                recomputeNavRatios();
+                return;
             }
+
+            appData.navHistory.sort((a, b) => new Date(a.date) - new Date(b.date));
+            const lastRecordDate = new Date(appData.navHistory[appData.navHistory.length - 1].date);
+            
+            const today = new Date();
+            const todayStr = today.toISOString().split('T')[0];
+            const currentTotal = computeCurrentTotalAssets();
+
+            let checkDate = new Date(lastRecordDate.getTime() + 86400000);
+            while (checkDate <= today) {
+                const dayStr = checkDate.toISOString().split('T')[0];
+                const dayOfWeek = checkDate.getDay();
+
+                if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+                    const existingIdx = appData.navHistory.findIndex(h => h.date === dayStr);
+                    if (existingIdx !== -1) {
+                        if (dayStr === todayStr && !appData.navHistory[existingIdx].manual) {
+                            appData.navHistory[existingIdx].totalAssets = currentTotal;
+                        }
+                    } else {
+                        const targetTotal = (dayStr === todayStr) ? currentTotal : computeAssetsAtDate(dayStr); 
+                        appData.navHistory.push({ date: dayStr, totalAssets: targetTotal, nav: 1, manual: false });
+                    }
+                }
+                checkDate.setDate(checkDate.getDate() + 1);
+            }
+
+            const uniqueMap = {};
+            appData.navHistory.forEach(h => { uniqueMap[h.date] = h; });
+            appData.navHistory = Object.values(uniqueMap);
+
             recomputeNavRatios();
         }
 
@@ -357,7 +426,6 @@
             return holdings;
         }
 
-        // ============ 实时行情（腾讯财经，JSONP，30秒轮询）============
         function tickerToTencentCode(tk) {
             tk = tk.trim().replace(/^0+(?=\d)/, '');
             if (/\.HK$/i.test(tk)) {
@@ -401,7 +469,6 @@
             return { price, dailyPct: isNaN(dp) ? null : dp };
         }
 
-        // ============ 基准指数历史数据（标普500 / 纳指100，腾讯财经历史K线）============
         const BENCHMARK_DEFS = {
             SP500: { label: '标普500', codes: ['us.SPX', 'us.INX'], color: '#AF52DE' }
         };
@@ -455,7 +522,7 @@
         }
 
         let selectedBenchmarks = new Set();
-
+        let quoteInFlight = false;
 
         async function refreshQuotes() {
             if (quoteInFlight) return;
@@ -467,6 +534,8 @@
             if (tickers.length === 0) {
                 if (statusEl) statusEl.innerText = '暂无持仓，无需获取行情';
                 if (dotEl) dotEl.className = 'status-dot';
+                autoRecordDailyNav();
+                saveData();
                 return;
             }
             quoteInFlight = true;
@@ -530,7 +599,6 @@
             if (!document.hidden) refreshQuotes();
         });
 
-        // ============ 图表：模式 + 区间 ============
         let chartMode = 'return';
         let chartPeriod = 'all';
         let navChartInstance = null;
@@ -567,7 +635,9 @@
                 startDate = new Date(lastDate.getTime() - days * 86400000);
             }
             if (startDate < firstDate) startDate = firstDate;
-            return { min: dayNum(startDate.toISOString().split('T')[0]), max: dayNum(lastDate.toISOString().split('T')[0]) };
+            let min = dayNum(startDate.toISOString().split('T')[0]);
+            let max = dayNum(lastDate.toISOString().split('T')[0]);
+            return { min, max };
         }
 
         function setChartMode(mode, el) {
@@ -709,6 +779,14 @@
             try {
                 const ctx = canvasEl.getContext('2d');
                 if (navChartInstance) navChartInstance.destroy();
+
+                let xMin = range ? range.min : undefined;
+                let xMax = range ? range.max : undefined;
+                if (xMin !== undefined && xMax !== undefined && xMin === xMax) {
+                    xMin = xMin - 1;
+                    xMax = xMax + 1;
+                }
+
                 navChartInstance = new Chart(ctx, {
                     type: 'line',
                     data: { datasets },
@@ -730,7 +808,7 @@
                                         const lbl = ctx.dataset.label;
                                         if (valueType === 'percent') return `${lbl}: ${v>=0?'+':''}${v.toFixed(2)}%`;
                                         if (valueType === 'currency') return `${lbl}: $${v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
-                                        return `${lbl}: ${v.toFixed(4)}`;
+                                        return `${lbl}: ${v.toFixed(3)}`;
                                     }
                                 }
                             }
@@ -739,18 +817,22 @@
                             x: {
                                 type: 'linear',
                                 grid: { display: false },
-                                min: range ? range.min : undefined,
-                                max: range ? range.max : undefined,
+                                min: xMin,
+                                max: xMax,
                                 ticks: {
-                                    callback: (v) => dayNumToLabel(v),
-                                    maxTicksLimit: 5,
+                                    callback: (v) => dayNumToLabel(Math.round(v)),
+                                    maxTicksLimit: 6,
                                     font: { size: 10 }
                                 }
                             },
                             y: {
                                 grid: { color: '#E5E5EA' },
                                 ticks: {
-                                    callback: (v) => valueType === 'percent' ? `${v}%` : valueType === 'currency' ? `$${(v/1000).toFixed(0)}k` : v
+                                    callback: function(v) {
+                                        if (valueType === 'percent') return `${v}%`;
+                                        if (valueType === 'currency') return `$${(v/1000).toFixed(0)}k`;
+                                        return Number(v).toFixed(3); 
+                                    }
                                 }
                             }
                         }
@@ -759,7 +841,6 @@
             } catch(e) { console.error("图表初始化失败:", e); }
         }
 
-        // ============ 年化收益率 / 最大回撤 ============
         function calcAnnualizedReturn() {
             const h = appData.navHistory;
             if (!h || h.length < 2) return null;
@@ -784,7 +865,6 @@
             return maxDD;
         }
 
-        // ============ 净值快照 ============
         function recomputeNavRatios() {
             if (!appData.navHistory || appData.navHistory.length === 0) return;
             appData.navHistory.sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -814,7 +894,6 @@
             saveData();
         }
 
-        // ============ 仓位分布环形图 ============
         let allocationChartInstance = null;
         const ALLOC_COLORS = ['#0F5257', '#5D5D9C', '#E08E45', '#C2604E', '#DDAE47', '#9C6FA6', '#5A7BA6', '#7A8B4E', '#C98A96', '#7FA6A8'];
 
@@ -964,7 +1043,6 @@
                 if (!appData.groups) appData.groups = {};
                 const groupOf = (tk) => appData.groups[tk] && appData.groups[tk].trim() ? appData.groups[tk].trim() : '未分组';
 
-                // 按分组聚合并计算每组市值，组间按市值从高到低排序
                 const groupMap = {};
                 sortedTickers.forEach(tk => {
                     const g = groupOf(tk);
@@ -1128,7 +1206,6 @@
             reader.readAsText(input.files[0]);
         }
 
-        // ============ 顶部实时时钟与联网状态点 ============
         function formatFullClock() {
             const w = ['周日','周一','周二','周三','周四','周五','周六'];
             const n = new Date();
@@ -1143,12 +1220,10 @@
         }
         setInterval(tickClock, 1000);
 
-        // 核心安全初始化
         function initApp() {
             renderAll();
             renderChartControls();
             tickClock();
-            // 延迟尝试渲染图表，给 CDN 留出缓冲时间
             setTimeout(updateChart, 300);
             setTimeout(refreshQuotes, 600);
             scheduleNextQuotePoll();
