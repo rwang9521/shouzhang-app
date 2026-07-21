@@ -101,6 +101,20 @@
         .primary-text { font-size: 16px; font-weight: 500; }
         .secondary-text { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
 
+        /* 新增：持仓界面顶部今日收益展示样式 */
+        .holding-summary-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #F8F9FA;
+            padding: 12px 16px;
+            border-radius: 12px;
+            margin-bottom: 14px;
+        }
+        .holding-summary-item { display: flex; flex-direction: column; }
+        .holding-summary-label { font-size: 11px; color: var(--text-muted); font-weight: 600; margin-bottom: 2px; }
+        .holding-summary-val { font-size: 16px; font-weight: 700; }
+
         select, input { width: 100%; padding: 14px; margin-bottom: 14px; border-radius: 12px; border: 1px solid var(--border-color); background: #F2F2F7; font-size: 15px; color: var(--text-main); outline: none; }
         select:focus, input:focus { border-color: var(--accent-blue); background: var(--card-bg); }
         button { width: 100%; padding: 14px; background: var(--text-main); color: #FFF; border: none; border-radius: 12px; font-size: 15px; font-weight: 600; cursor: pointer; }
@@ -199,6 +213,19 @@
                 <span class="quote-status-text" id="quote-status">尚未获取实时行情</span>
                 <button class="refresh-btn" onclick="refreshQuotes()">刷新行情</button>
             </div>
+            
+            <!-- 新增：持仓板块顶部今日收益汇总栏 -->
+            <div class="holding-summary-bar">
+                <div class="holding-summary-item">
+                    <span class="holding-summary-label">今日收益 (USD)</span>
+                    <span class="holding-summary-val" id="holdings-today-pnl">+$0.00</span>
+                </div>
+                <div class="holding-summary-item" style="text-align: right;">
+                    <span class="holding-summary-label">今日收益率</span>
+                    <span class="holding-summary-val" id="holdings-today-pct">+0.00%</span>
+                </div>
+            </div>
+
             <div class="card-title" style="margin-bottom:6px;">多账户合并持仓</div>
             <div id="holdings-list"></div>
         </div>
@@ -305,8 +332,6 @@
             } catch(e) {}
         }
 
-        // ============ 历史净值回溯重建 ============
-        // 流程：历史日期 → 读取当天持仓 → 匹配当天收盘价 → 计算股票市值 → +现金 → 得到当天总资产
         async function getStockHistorySeries(ticker) {
             if (!appData.stockHistoryCache) appData.stockHistoryCache = {};
             const cached = appData.stockHistoryCache[ticker];
@@ -314,10 +339,8 @@
             if (cached && cached.fetchedAt === today && cached.series && cached.series.length > 0) {
                 return cached.series;
             }
-            // 数据源1：腾讯财经（主流股票）
             const code = tickerToHistoryCode(ticker);
             let series = await fetchIndexDailySeries(code);
-            // 数据源2：Yahoo Finance（冷门美股备用）
             if (!series || series.length === 0) {
                 console.log(`[行情] ${ticker} 腾讯无数据，尝试 Yahoo Finance...`);
                 series = await fetchYahooDailySeries(ticker);
@@ -349,11 +372,7 @@
             return 0;
         }
 
-        // ---- 正向现金计算 ----
-        // 在 rebuild 时计算一次初始现金（从当前余额倒推出起始日前的现金），
-        // 之后所有历史日期的现金都从初始现金正向累加。
-        // 用户不再需要修改 accounts 里的现金余额，所有现金变化都通过交易记录驱动。
-        let _initialCashCache = null; // { accountName: cash }
+        let _initialCashCache = null;
 
         function computeInitialCash() {
             const cache = {};
@@ -363,7 +382,7 @@
                 appData.transactions.forEach(tx => {
                     if (tx.account === accName) effectSum += cashEffect(tx);
                 });
-                cache[accName] = current - effectSum; // 仅此一次倒推，之后全部正向
+                cache[accName] = current - effectSum;
             });
             return cache;
         }
@@ -384,27 +403,21 @@
             if (rebuildingNav) return;
             rebuildingNav = true;
             try {
-                // 0. 刷新初始现金缓存（正向计算用）
                 _initialCashCache = computeInitialCash();
 
                 const tradeTickers = [...new Set(appData.transactions.filter(t => t.type === 'BUY' || t.type === 'SELL').map(t => t.ticker))];
                 if (tradeTickers.length === 0) { rebuildingNav = false; return; }
 
-                // 1. 获取每只股票的历史收盘价序列
                 const priceSeriesMap = {};
                 for (const tk of tradeTickers) {
                     const s = await getStockHistorySeries(tk);
                     if (s) priceSeriesMap[tk] = s;
                 }
 
-                // 2. 确定日期范围：从第一笔交易到今日
                 const txDates = appData.transactions.map(t => t.date).sort();
                 const firstDate = txDates[0];
                 const todayStr = new Date().toISOString().split('T')[0];
 
-                // 3. 先生成所有交易日作为骨架（周一到周五）
-                //    再叠加上价格序列中的真实日期
-                //    这样行情API即使失败也有充足的日期点
                 const allBusinessDates = [];
                 {
                     const startD = new Date(firstDate);
@@ -417,19 +430,15 @@
                     }
                 }
 
-                // 收集价格序列中的真实交易日
                 const priceDateSet = new Set();
                 Object.values(priceSeriesMap).forEach(series => series.forEach(p => priceDateSet.add(p.date)));
 
-                // 合并：以全部工作日为底 + 价格真实日期 + 交易发生日期
                 const txDateSet = new Set(appData.transactions.map(t => t.date));
                 const merged = new Set([...allBusinessDates]);
                 priceDateSet.forEach(d => merged.add(d));
                 txDateSet.forEach(d => merged.add(d));
                 const tradingDates = [...merged].filter(d => d >= firstDate && d <= todayStr).sort();
 
-                // 4. 建立"日期→收盘价"查找表，用历史数据做前值填充
-                //    对每个交易日，取<=该日的最新收盘价
                 const closeAt = {};
                 tradeTickers.forEach(tk => {
                     const sorted = priceSeriesMap[tk]
@@ -437,10 +446,7 @@
                         : [];
                     closeAt[tk] = {};
                     if (sorted.length === 0) {
-                        // ---- 没有历史K线数据（冷门股票） ----
-                        // 首日用第一笔买入价（确保初始资产正确），之后用当前实时价
                         const currentPrice = appData.prices[tk] != null ? appData.prices[tk] : null;
-                        // 找到第一笔买入交易的成交价
                         const firstBuyTx = appData.transactions
                             .filter(t => t.ticker === tk && t.type === 'BUY' && t.shares > 0)
                             .sort((a, b) => new Date(a.date) - new Date(b.date))[0];
@@ -448,14 +454,12 @@
 
                         tradingDates.forEach(d => {
                             if (firstBuyTx && d <= firstBuyTx.date) {
-                                closeAt[tk][d] = firstBuyPrice;  // 买入日及之前：用买入价
+                                closeAt[tk][d] = firstBuyPrice;
                             } else {
-                                closeAt[tk][d] = currentPrice;    // 之后：用当前市场价
+                                closeAt[tk][d] = currentPrice;
                             }
                         });
                     } else {
-                        // ---- 有历史K线数据（主流股票） ----
-                        // 前值填充，用第一个历史收盘价做初始值
                         let idx = 0;
                         let lastClose = sorted[0].close;
                         tradingDates.forEach(d => {
@@ -468,27 +472,14 @@
                     }
                 });
 
-                // === DEBUG: 查看数据生成情况 ===
-                console.log('[净值重建] 交易日数:', tradingDates.length, '首日:', tradingDates[0], '末日:', tradingDates[tradingDates.length-1]);
-                console.log('[净值重建] 股票数:', tradeTickers.length, '有行情数据的股票:',
-                    Object.keys(priceSeriesMap).filter(k => priceSeriesMap[k]).join(', ') || '无');
-                console.log('[净值重建] 价格日期来源:', priceDateSet.size > 0 ? 'API行情' : '仅有工作日');
-                tradeTickers.forEach(tk => {
-                    const s = priceSeriesMap[tk];
-                    console.log(`[净值重建] ${tk}: 价格数据 ${s ? s.length + '条' : '无'}, 当前价: ${appData.prices[tk]}`);
-                });
-
-                // 5. 遍历每个交易日，计算 totalAssets = Σ(股数×收盘价) + 现金
                 const accountNames = Object.keys(appData.accounts);
                 const manualOverrides = {};
                 (appData.navHistory || []).forEach(h => { if (h.manual) manualOverrides[h.date] = h; });
 
-                // 预计算每个交易日的持仓股数（优化：只计算 ticker 有持仓变化的日期）
                 const shareCache = {};
                 tradeTickers.forEach(tk => {
                     shareCache[tk] = {};
                     let cumShares = 0;
-                    // 先过一遍所有交易，记录每次变化
                     const txForTicker = appData.transactions
                         .filter(t => t.ticker === tk && (t.type === 'BUY' || t.type === 'SELL'))
                         .sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -503,7 +494,6 @@
                     });
                 });
 
-                // 预计算现金
                 const cashCache = {};
                 accountNames.forEach(acc => {
                     cashCache[acc] = {};
@@ -572,7 +562,6 @@
             return holdings;
         }
 
-        // ============ 实时行情（腾讯财经，JSONP，30秒轮询）============
         function tickerToTencentCode(tk) {
             tk = tk.trim().replace(/^0+(?=\d)/, '');
             if (/\.HK$/i.test(tk)) {
@@ -585,8 +574,6 @@
             return 'us' + tk.toUpperCase();
         }
 
-        // 腾讯历史K线API要求美股格式为 us.AAPL（带小数点）
-        // 而实时行情API qt.gtimg.cn 要求 usAAPL（无小数点）
         function tickerToHistoryCode(tk) {
             tk = tk.trim().replace(/^0+(?=\d)/, '');
             if (/\.HK$/i.test(tk)) {
@@ -596,7 +583,7 @@
             if (/^\d{4,5}$/.test(tk)) {
                 return 'hk' + tk.padStart(5, '0');
             }
-            return 'us.' + tk.toUpperCase(); // 美股历史K线：加小数点
+            return 'us.' + tk.toUpperCase();
         }
 
         function qqJsonp(codes, timeout = 8000) {
@@ -630,7 +617,6 @@
             return { price, dailyPct: isNaN(dp) ? null : dp };
         }
 
-        // ============ 基准指数历史数据（标普500 / 纳指100，腾讯财经历史K线）============
         const BENCHMARK_DEFS = {
             SP500: { label: '标普500', codes: ['us.SPX', 'us.INX'], color: '#AF52DE' }
         };
@@ -663,42 +649,30 @@
             return buf.map(row => ({ date: row[0], close: parseFloat(row[2]) })).filter(p => !isNaN(p.close));
         }
 
-        // ---- Yahoo Finance 备用数据源 ----
-        // 腾讯查不到的冷门美股，改用 Yahoo Finance（覆盖几乎所有美股）
-        // [修复版] 使用 allorigins 跨域代理 + 原生 fetch 替代 JSONP
         async function fetchYahooDailySeries(ticker) {
             const end = Math.floor(Date.now() / 1000);
-            const start = end - 730 * 86400; // 取2年数据
-            
-            // 目标雅虎接口 URL
+            const start = end - 730 * 86400;
             const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?period1=${start}&period2=${end}&interval=1d&events=history`;
-            
-            // 使用 free CORS proxy 包装目标 URL
             const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
 
             try {
                 const response = await fetch(proxyUrl);
                 if (!response.ok) return null;
-                
                 const proxyData = await response.json();
                 const data = JSON.parse(proxyData.contents);
 
-                if (!data || !data.chart || !data.chart.result || data.chart.result.length === 0) {
-                    return null;
-                }
+                if (!data || !data.chart || !data.chart.result || data.chart.result.length === 0) return null;
                 
                 const result = data.chart.result[0];
                 const timestamps = result.timestamp;
                 const closes = result.indicators ? result.indicators.quote[0].close : null;
                 
-                if (!timestamps || !closes) { return null; }
+                if (!timestamps || !closes) return null;
                 
-                const series = timestamps.map((t, i) => ({
+                return timestamps.map((t, i) => ({
                     date: new Date(t * 1000).toISOString().split('T')[0],
                     close: closes[i]
                 })).filter(p => p.close != null && !isNaN(p.close));
-                
-                return series;
             } catch(e) { 
                 console.warn(`[API] Yahoo 获取失败: ${ticker}`, e);
                 return null; 
@@ -711,9 +685,8 @@
             const cached = appData.benchmarkCache[key];
             const today = new Date().toISOString().split('T')[0];
             const cacheValid = cached && cached.fetchedAt === today && cached.series && cached.series.length > 5 && def.codes.includes(cached.sourceCode);
-            if (cacheValid) {
-                return cached.series;
-            }
+            if (cacheValid) return cached.series;
+            
             for (const code of def.codes) {
                 const series = await fetchIndexDailySeries(code);
                 if (series && series.length > 5) {
@@ -801,7 +774,6 @@
             if (!document.hidden) refreshQuotes();
         });
 
-        // ============ 图表：模式 + 区间 ============
         let chartMode = 'return';
         let chartPeriod = 'all';
         let navChartInstance = null;
@@ -840,7 +812,7 @@
             if (startDate < firstDate) startDate = firstDate;
             let min = dayNum(startDate.toISOString().split('T')[0]);
             let max = dayNum(lastDate.toISOString().split('T')[0]);
-            if (min === max) { min -= 1; max += 1; } // 只有一个数据点时人为撑开范围，避免坐标轴零宽度导致图表不可见
+            if (min === max) { min -= 1; max += 1; }
             return { min, max };
         }
 
@@ -1033,7 +1005,6 @@
             } catch(e) { console.error("图表初始化失败:", e); }
         }
 
-        // ============ 年化收益率 / 最大回撤 ============
         function calcAnnualizedReturn() {
             const h = appData.navHistory;
             if (!h || h.length < 2) return null;
@@ -1058,7 +1029,6 @@
             return maxDD;
         }
 
-        // ============ 净值快照 ============
         function recomputeNavRatios() {
             if (!appData.navHistory || appData.navHistory.length === 0) return;
             appData.navHistory.sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -1066,10 +1036,6 @@
             appData.navHistory.forEach(h => {
                 if (base > 0 && h.totalAssets != null) h.nav = h.totalAssets / base;
             });
-            console.log('[净值重建] 净值点数:', appData.navHistory.length,
-                '首日资产:', appData.navHistory[0].totalAssets.toFixed(2),
-                '末日资产:', appData.navHistory[appData.navHistory.length-1].totalAssets.toFixed(2),
-                '累计收益率:', ((appData.navHistory[appData.navHistory.length-1].nav - 1) * 100).toFixed(2) + '%');
         }
 
         function addNavSnapshot() {
@@ -1092,7 +1058,6 @@
             saveData();
         }
 
-        // ============ 仓位分布环形图 ============
         let allocationChartInstance = null;
         const ALLOC_COLORS = ['#0F5257', '#5D5D9C', '#E08E45', '#C2604E', '#DDAE47', '#9C6FA6', '#5A7BA6', '#7A8B4E', '#C98A96', '#7FA6A8'];
 
@@ -1167,13 +1132,35 @@
             try {
                 const holdings = calculateHoldings();
                 let totalStockValue = 0;
+                let todayTotalGain = 0; // 新增：计算今日持仓总收益额
+
                 Object.keys(holdings).forEach(tk => {
                     if(holdings[tk].shares > 0) {
-                        totalStockValue += holdings[tk].shares * holdings[tk].currentPrice;
+                        const val = holdings[tk].shares * holdings[tk].currentPrice;
+                        totalStockValue += val;
+
+                        // 计算单只股票今日收益额
+                        const dailyPct = appData.dailyPct ? appData.dailyPct[tk] : null;
+                        if (dailyPct != null) {
+                            // 当日变化 = 当天市值 - 昨天收盘市值 = 当天市值 * (dailyPct / (100 + dailyPct))
+                            const todayGain = val * (dailyPct / (100 + dailyPct));
+                            todayTotalGain += todayGain;
+                        }
                     }
                 });
                 let totalCash = Object.values(appData.accounts).reduce((sum, acc) => sum + acc.cash, 0);
                 let grandTotal = totalStockValue + totalCash;
+
+                // 更新持仓界面的今日收益和收益率
+                const todayPct = totalStockValue > 0 ? (todayTotalGain / (totalStockValue - todayTotalGain)) * 100 : 0;
+                const pnlEl = document.getElementById('holdings-today-pnl');
+                const pctEl = document.getElementById('holdings-today-pct');
+                if (pnlEl && pctEl) {
+                    pnlEl.innerText = `${todayTotalGain >= 0 ? '+' : ''}$${todayTotalGain.toFixed(2)}`;
+                    pnlEl.className = 'holding-summary-val ' + (todayTotalGain >= 0 ? 'up-trend' : 'down-trend');
+                    pctEl.innerText = `${todayPct >= 0 ? '+' : ''}${todayPct.toFixed(2)}%`;
+                    pctEl.className = 'holding-summary-val ' + (todayPct >= 0 ? 'up-trend' : 'down-trend');
+                }
 
                 document.getElementById('global-assets').innerText = `$${grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
                 document.getElementById('global-cash-chip').innerText = `$${totalCash.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
@@ -1242,7 +1229,6 @@
                 if (!appData.groups) appData.groups = {};
                 const groupOf = (tk) => appData.groups[tk] && appData.groups[tk].trim() ? appData.groups[tk].trim() : '未分组';
 
-                // 按分组聚合并计算每组市值，组间按市值从高到低排序
                 const groupMap = {};
                 sortedTickers.forEach(tk => {
                     const g = groupOf(tk);
@@ -1274,20 +1260,26 @@
                         let pct = grandTotal > 0 ? (currentVal / grandTotal) * 100 : 0;
                         let daily = appData.dailyPct ? appData.dailyPct[tk] : null;
                         const liveTag = (appData.priceIsLive && appData.priceIsLive[tk] === true) ? '<span class="live-tag live">实时</span>' : '<span class="live-tag manual">手动</span>';
-                        const dailyHtml = (daily != null) ? `<span class="secondary-text ${daily>=0?'up-trend':'down-trend'}" style="margin-top:0;">今日 ${daily>=0?'+':''}${daily.toFixed(2)}%</span>` : '';
+                        
+                        // 计算单股票今日收益金额
+                        let itemTodayGain = (daily != null) ? currentVal * (daily / (100 + daily)) : null;
+                        let itemTodayHtml = (itemTodayGain != null) 
+                            ? `<span class="secondary-text ${daily>=0?'up-trend':'down-trend'}" style="margin-top:2px;">今日: ${daily>=0?'+':''}$${itemTodayGain.toFixed(2)} (${daily>=0?'+':''}${daily.toFixed(2)}%)</span>`
+                            : '';
 
                         holdingsList.innerHTML += `
                             <div class="item-row">
                                 <div class="item-left">
                                     <span class="primary-text">${tk}<span class="position-tag">${pct.toFixed(1)}%</span><span class="group-tag" onclick="editGroup('${tk}')">${groupOf(tk)} ✏️</span></span>
                                     <span class="secondary-text">持仓: ${h.shares} 股 | 摊薄成本: $${dilutedCostPrice.toFixed(2)}</span>
-                                    <span class="secondary-text">现价: $${h.currentPrice.toFixed(2)} ${liveTag} ${dailyHtml}</span>
+                                    <span class="secondary-text">现价: $${h.currentPrice.toFixed(2)} ${liveTag}</span>
                                 </div>
                                 <div class="item-right">
                                     <span class="primary-text">$${currentVal.toFixed(2)}</span>
                                     <span class="secondary-text ${pl >= 0 ? 'up-trend' : 'down-trend'}">
-                                        ${pl >= 0 ? '+' : ''}${pl.toFixed(2)} (${plRate.toFixed(2)}%)
+                                        累计: ${pl >= 0 ? '+' : ''}${pl.toFixed(2)} (${plRate.toFixed(2)}%)
                                     </span>
+                                    ${itemTodayHtml}
                                 </div>
                             </div>`;
 
@@ -1355,7 +1347,6 @@
 
             saveData();
             if (!isTransfer) refreshQuotes();
-            // 交易后立即重建净值历史，确保新交易反映在曲线上
             rebuildFullNavHistory().then(() => { saveData(); updateChart(); });
             document.getElementById('tx-ticker').value = '';
             document.getElementById('tx-amount').value = '';
@@ -1409,7 +1400,6 @@
             reader.readAsText(input.files[0]);
         }
 
-        // ============ 顶部实时时钟与联网状态点 ============
         function formatFullClock() {
             const w = ['周日','周一','周二','周三','周四','周五','周六'];
             const n = new Date();
@@ -1424,17 +1414,12 @@
         }
         setInterval(tickClock, 1000);
 
-        // 核心安全初始化
         async function initApp() {
-            // 1. 先重建完整的净值历史（确保图表有每个交易日的数据点）
             await rebuildFullNavHistory();
-            // 2. 渲染界面
             renderAll();
             renderChartControls();
             tickClock();
-            // 3. 渲染图表（此时 navHistory 已完整）
             updateChart();
-            // 4. 获取实时行情（完成后会再次重建并更新图表）
             setTimeout(refreshQuotes, 600);
             scheduleNextQuotePoll();
         }
